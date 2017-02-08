@@ -1,5 +1,5 @@
 // Constants
-def pluggableGitURL = "https://github.com/Accenture/adop-pluggable-scm"
+def pluggableGitURL = "https://innersource.accenture.com/scm/adop-e/adop-pluggable-scm.git"
 
 def platformManagementFolderName= "/Platform_Management"
 def platformManagementFolder = folder(platformManagementFolderName) { displayName('Platform Management') }
@@ -34,7 +34,7 @@ ls ${PLUGGABLE_SCM_PROVIDER_PATH}pluggable/scm/
                 name("origin")
                 url("${pluggableGitURL}")
             }
-            branch("*/master")
+            branch("*/feature/ADOPP-344")
         }
     }
 }
