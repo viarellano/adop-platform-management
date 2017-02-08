@@ -16,6 +16,7 @@ generateProjectJob.with {
     parameters
     {
         stringParam("PROJECT_NAME","","The name of the project to be generated.")
+        booleanParam('CUSTOM_SCM_NAMESPACE', false, 'Enables the option to provide a custom project namespace for your SCM provider')
     }
     environmentVariables
     {
