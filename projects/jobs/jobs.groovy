@@ -55,7 +55,9 @@ loadCartridgeJob.with{
         booleanParam('ENABLE_CODE_REVIEW', false, 'Enables Gerrit Code Reviewing for the selected cartridge')
         booleanParam('OVERWRITE_REPOS', false, 'If ticked, existing code repositories (previously loaded by the cartridge) will be overwritten. For first time cartridge runs, this property is redundant and will perform the same behavior regardless.')
     }
-    environmentVariables {
+    environmentVariables
+    {
+        groovy("return [SCM_KEY: org.apache.commons.lang.RandomStringUtils.randomAlphanumeric(20)]")
         env('WORKSPACE_NAME',workspaceFolderName)
         env('PROJECT_NAME',projectFolderName)
     }
@@ -144,6 +146,36 @@ fileList.each {
     jenkinsInstace.getItem(projectName,jenkinsInstace).createProjectFromXML(jobName, xmlStream)
 }
 ''')
+        systemGroovyCommand('''import pluggable.scm.PropertiesSCMProviderDataStore
+import pluggable.scm.SCMProviderDataStore
+import pluggable.configuration.EnvVarProperty;
+import pluggable.scm.helpers.HelperUtils
+import java.util.Properties
+import hudson.FilePath
+
+
+String scmProviderId = build.getEnvironment(listener).get('SCM_PROVIDER_ID')
+EnvVarProperty envVarProperty = EnvVarProperty.getInstance();
+
+
+envVarProperty.setVariableBindings(build.getEnvironment(listener));
+SCMProviderDataStore scmProviderDataStore = new PropertiesSCMProviderDataStore();
+Properties scmProviderProperties = scmProviderDataStore.get(scmProviderId);
+
+// get credentials
+
+String credentialId = scmProviderProperties.get("loader.credentialId")
+
+credentialInfo = HelperUtils.extractPasswordCredentials(credentialId);
+
+channel = build.workspace.channel;
+fp = new FilePath(channel, build.workspace.toString() + "/" + build.getEnvVars()["SCM_KEY"])
+
+fp.write("SCM_USERNAME="+credentialInfo[0]+"\\nSCM_PASSWORD="+credentialInfo[1], null);
+
+'''){
+            classpath('$WORKSPACE/job_dsl_additional_classpath/')
+        }
         dsl {
             text('''import pluggable.scm.*;
 
@@ -228,7 +260,7 @@ def cartridgeFolder = folder(cartridgeFolderName) {
             external("cartridge/**/jenkins/jobs/dsl/*.groovy")
             additionalClasspath("job_dsl_additional_classpath")
         }
-
+        shell('rm -f $WORKSPACE/$SCM_KEY')
     }
     scm {
         git {
