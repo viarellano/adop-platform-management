@@ -2,19 +2,9 @@
 def gerritBaseUrl = "ssh://jenkins@gerrit:29418"
 def cartridgeBaseUrl = gerritBaseUrl + "/cartridges"
 def platformToolsGitUrl = gerritBaseUrl + "/platform-management"
-def scmPropertiesPath = "${PLUGGABLE_SCM_PROVIDER_PROPERTIES_PATH}"
 
 // Folders
 def workspaceFolderName = "${WORKSPACE_NAME}"
-
-// Dynamic values
-def customScmNamespace = "${CUSTOM_SCM_NAMESPACE}"
-String namespaceValue = null
-if (customScmNamespace == "true"){
-    namespaceValue = '"${SCM_NAMESPACE}"'
-} else {
-    namespaceValue = 'null'
-}
 
 def projectFolderName = workspaceFolderName + "/${PROJECT_NAME}"
 def projectFolder = folder(projectFolderName)
@@ -39,15 +29,6 @@ def loadCartridgeCollectionJob = workflowJob(cartridgeManagementFolderName + "/L
 // Setup Load_Cartridge
 loadCartridgeJob.with{
     parameters{
-        activeChoiceParam('SCM_PROVIDER') {
-            description('Your chosen SCM Provider and the appropriate cloning protocol')
-            filterable()
-            choiceType('SINGLE_SELECT')
-            scriptlerScript('retrieve_scm_props.groovy')
-        }
-        if (customScmNamespace == "true"){
-            stringParam('SCM_NAMESPACE', '', 'The namespace for your SCM provider which will prefix your created repositories')
-        }
         choiceParam('CARTRIDGE_CLONE_URL', cartridge_list, 'Cartridge URL to load')
         stringParam('CARTRIDGE_FOLDER', '', 'The folder within the project namespace where your cartridge will be loaded into.')
         stringParam('FOLDER_DISPLAY_NAME', '', 'Display name of the folder where the cartridge is loaded.')
@@ -55,9 +36,7 @@ loadCartridgeJob.with{
         booleanParam('ENABLE_CODE_REVIEW', false, 'Enables Gerrit Code Reviewing for the selected cartridge')
         booleanParam('OVERWRITE_REPOS', false, 'If ticked, existing code repositories (previously loaded by the cartridge) will be overwritten. For first time cartridge runs, this property is redundant and will perform the same behavior regardless.')
     }
-    environmentVariables
-    {
-        groovy("return [SCM_KEY: org.apache.commons.lang.RandomStringUtils.randomAlphanumeric(20)]")
+    environmentVariables {
         env('WORKSPACE_NAME',workspaceFolderName)
         env('PROJECT_NAME',projectFolderName)
     }
@@ -66,15 +45,12 @@ loadCartridgeJob.with{
         injectPasswords()
         maskPasswords()
         sshAgent("adop-jenkins-master")
-        credentialsBinding {
-            file('SCM_SSH_KEY', 'adop-jenkins-private')
-        }
     }
     steps {
         shell('''#!/bin/bash -ex
 
 # We trust everywhere
-echo -e "#!/bin/sh\nexec ssh -i ${SCM_SSH_KEY} -o StrictHostKeyChecking=no \"\\\$@\"\n" > ${WORKSPACE}/custom_ssh
+echo -e "#!/bin/sh\nexec ssh -o StrictHostKeyChecking=no \"\\\$@\"\n" > ${WORKSPACE}/custom_ssh
 chmod +x ${WORKSPACE}/custom_ssh
 export GIT_SSH="${WORKSPACE}/custom_ssh"
 
@@ -84,18 +60,64 @@ git clone ${CARTRIDGE_CLONE_URL} cartridge
 # Find the cartridge
 export CART_HOME=$(dirname $(find -name metadata.cartridge | head -1))
 
+# Check if the user has enabled Gerrit Code reviewing
+if [ "$ENABLE_CODE_REVIEW" == true ]; then
+    permissions_repo="${PROJECT_NAME}/permissions-with-review"
+else
+    permissions_repo="${PROJECT_NAME}/permissions"
+fi
 
-# Create temp directory for repositories
+# Check if folder was specified
+if [ -z ${CARTRIDGE_FOLDER} ] ; then
+    echo "Folder name not specified..."
+    repo_namespace="${PROJECT_NAME}"
+else
+    echo "Folder name specified, changing project namespace value.."
+    repo_namespace="${PROJECT_NAME}/${CARTRIDGE_FOLDER}"
+fi
+
+# Create repositories
 mkdir ${WORKSPACE}/tmp
+cd ${WORKSPACE}/tmp
+while read repo_url; do
+    if [ ! -z "${repo_url}" ]; then
+        repo_name=$(echo "${repo_url}" | rev | cut -d'/' -f1 | rev | sed 's#.git$##g')
+        target_repo_name="${repo_namespace}/${repo_name}"
+        # Check if the repository already exists or not
+        repo_exists=0
+        list_of_repos=$(ssh -n -o StrictHostKeyChecking=no -p 29418 jenkins@gerrit gerrit ls-projects --type code)
 
-# Copy pluggable SCM package into workspace
-mkdir ${WORKSPACE}/job_dsl_additional_classpath
-cp -r ${PLUGGABLE_SCM_PROVIDER_PATH}pluggable $WORKSPACE/job_dsl_additional_classpath
+        for repo in ${list_of_repos}
+        do
+            if [ ${repo} = ${target_repo_name} ]; then
+                echo "Found: ${repo}"
+                repo_exists=1
+                break
+            fi
+        done
 
-# Output SCM provider ID to a properties file
-echo SCM_PROVIDER_ID=$(echo ${SCM_PROVIDER} | cut -d "(" -f2 | cut -d ")" -f1) > scm_provider_id.properties
-echo GIT_SSH="${GIT_SSH}" >> scm_provider.properties
+        # If not, create it
+        if [ ${repo_exists} -eq 0 ]; then
+            ssh -n -o StrictHostKeyChecking=no -p 29418 jenkins@gerrit gerrit create-project --parent "${permissions_repo}" "${target_repo_name}"
+        else
+            echo "Repository already exists, skipping create: ${target_repo_name}"
+        fi
 
+        # Populate repository
+        git clone ssh://jenkins@gerrit:29418/"${target_repo_name}"
+        cd "${repo_name}"
+        git remote add source "${repo_url}"
+        git fetch source
+        if [ "$OVERWRITE_REPOS" == true ]; then
+            git push origin +refs/remotes/source/*:refs/heads/*
+        else
+            set +e
+            git push origin refs/remotes/source/*:refs/heads/*
+            set -e
+        fi
+        cd -
+    fi
+done < ${WORKSPACE}/${CART_HOME}/src/urls.txt
 
 # Provision one-time infrastructure
 if [ -d ${WORKSPACE}/${CART_HOME}/infra ]; then
@@ -117,9 +139,6 @@ if [ -d ${WORKSPACE}/${CART_HOME}/jenkins/jobs ]; then
     fi
 fi
 ''')
-        environmentVariables {
-            propertiesFile('scm_provider_id.properties')
-        }
         systemGroovyCommand('''
 import jenkins.model.*
 import groovy.io.FileType
@@ -146,72 +165,6 @@ fileList.each {
     jenkinsInstace.getItem(projectName,jenkinsInstace).createProjectFromXML(jobName, xmlStream)
 }
 ''')
-        systemGroovyCommand('''import pluggable.scm.PropertiesSCMProviderDataStore
-import pluggable.scm.SCMProviderDataStore
-import pluggable.configuration.EnvVarProperty;
-import pluggable.scm.helpers.HelperUtils
-import java.util.Properties
-import hudson.FilePath
-
-
-String scmProviderId = build.getEnvironment(listener).get('SCM_PROVIDER_ID')
-EnvVarProperty envVarProperty = EnvVarProperty.getInstance();
-
-
-envVarProperty.setVariableBindings(build.getEnvironment(listener));
-SCMProviderDataStore scmProviderDataStore = new PropertiesSCMProviderDataStore();
-Properties scmProviderProperties = scmProviderDataStore.get(scmProviderId);
-
-// get credentials
-
-String credentialId = scmProviderProperties.get("loader.credentialId")
-
-credentialInfo = HelperUtils.extractPasswordCredentials(credentialId);
-
-channel = build.workspace.channel;
-fp = new FilePath(channel, build.workspace.toString() + "/" + build.getEnvVars()["SCM_KEY"])
-
-fp.write("SCM_USERNAME="+credentialInfo[0]+"\\nSCM_PASSWORD="+credentialInfo[1], null);
-
-'''){
-            classpath('$WORKSPACE/job_dsl_additional_classpath/')
-        }
-        dsl {
-            text('''import pluggable.scm.*;
-
-// Instantiate your SCM provider where your repos will be created
-SCMProvider scmProvider = SCMProviderHandler.getScmProvider("${SCM_PROVIDER_ID}", binding.variables)
-
-def workspace = "${WORKSPACE}"
-def projectFolderName = "${PROJECT_NAME}"
-def cartridgeFolder = "${CARTRIDGE_FOLDER}"
-def overwriteRepos = "${OVERWRITE_REPOS}"
-def scmNamespace = ''' + namespaceValue + '''
-def codeReviewEnabled = "${ENABLE_CODE_REVIEW}"
-
-String repoNamespace = null;
-
-// Check if a custom SCM namespace has been provided
-if (scmNamespace != null && !scmNamespace.isEmpty()){
-  println("Custom SCM namespace specified...")
-  repoNamespace = scmNamespace
-} else {
-  // Check if a folder is specified
-  println("Custom SCM namespace not specified, using default project namespace...")
-  if (cartridgeFolder == ""){
-    println("Folder name not specified...")
-    repoNamespace = projectFolderName
-  } else {
-    println("Folder name specified, changing project namespace value..")
-    repoNamespace = projectFolderName + "/" + cartridgeFolder
-  }
-}
-
-// Create your SCM repositories
-scmProvider.createScmRepos(workspace, repoNamespace, codeReviewEnabled, overwriteRepos)
-            ''')
-            additionalClasspath("job_dsl_additional_classpath/")
-        }
         conditionalSteps {
             condition {
                 shell ('''#!/bin/bash
@@ -258,9 +211,8 @@ def cartridgeFolder = folder(cartridgeFolderName) {
         }
         dsl {
             external("cartridge/**/jenkins/jobs/dsl/*.groovy")
-            additionalClasspath("job_dsl_additional_classpath")
         }
-        shell('rm -f $WORKSPACE/$SCM_KEY')
+
     }
     scm {
         git {
