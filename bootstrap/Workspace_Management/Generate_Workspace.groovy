@@ -45,8 +45,15 @@ generateWorkspaceJob.with {
                     echo "WORKSPACE_NAME contains a space, please replace with an underscore - exiting..."
                     exit 1
                 fi''')
-        if("${ADOP_ACL_ENABLED}" == "") {
-            shell('''
+        conditionalSteps
+        {
+            condition
+            {
+                stringsMatch('${ADOP_ACL_ENABLED}', 'true', true)
+            }
+            runner('Fail')
+            steps {
+                shell('''
                  # LDAP
                  ${WORKSPACE}/common/ldap/generate_role.sh -r "admin" -n "${WORKSPACE_NAME}" -d "${DC}" -g "${OU_GROUPS}" -p "${OU_PEOPLE}" -u "${ADMIN_USERS}" -f "${OUTPUT_FILE}" -w "${WORKSPACE}"
                  ${WORKSPACE}/common/ldap/generate_role.sh -r "developer" -n "${WORKSPACE_NAME}" -d "${DC}" -g "${OU_GROUPS}" -p "${OU_PEOPLE}" -u "${DEVELOPER_USERS}" -f "${OUTPUT_FILE}" -w "${WORKSPACE}"
@@ -67,16 +74,14 @@ generateWorkspaceJob.with {
                          ${WORKSPACE}/common/gerrit/create_user.sh -g http://gerrit:8080/gerrit -u "${username}" -p "${username}"
                  done
                  ''')
+                systemGroovyScriptFile('${WORKSPACE}/workspaces/groovy/acl_admin.groovy')
+                systemGroovyScriptFile('${WORKSPACE}/workspaces/groovy/acl_developer.groovy')
+                systemGroovyScriptFile('${WORKSPACE}/workspaces/groovy/acl_viewer.groovy')
+            }
         }
         dsl
         {
             external("workspaces/jobs/**/*.groovy")
-        }
-        if("${ADOP_ACL_ENABLED}" == "")
-        {
-            systemGroovyScriptFile('${WORKSPACE}/workspaces/groovy/acl_admin.groovy')
-            systemGroovyScriptFile('${WORKSPACE}/workspaces/groovy/acl_developer.groovy')
-            systemGroovyScriptFile('${WORKSPACE}/workspaces/groovy/acl_viewer.groovy')
         }
     }
     scm
