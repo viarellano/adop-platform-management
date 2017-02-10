@@ -13,7 +13,7 @@ setupGerritJob.with{
         preBuildCleanup()
         sshAgent('adop-jenkins-master')
         environmentVariables {
-            env('DC',"${LDAP_ROOTDN}")
+            env('DC',"")
         }
     }
     steps {
